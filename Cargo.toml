@@ -1,0 +1,18 @@
+[package]
+name = "drm-probe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+ffmpeg-sys-next = "8.1"
+grafting = { version = "0.6", default-features = false, features = ["wgpu-30"] }
+wgpu = "30"
+pollster = "0.4"
+env_logger = "0.11"
+dpi = "0.1"
+winit = "0.30"
+
+[patch.crates-io]
+grafting = { path = "vendor/grafting" }
