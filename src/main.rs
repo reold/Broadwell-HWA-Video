@@ -1,8 +1,9 @@
 mod app;
+mod export;
 mod ffmpeg;
 mod gpu;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use app::App;
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,6 +15,8 @@ use winit::window::{Window, WindowId};
 struct Root {
     app: Option<App>,
     path: String,
+    export_to: Option<String>,
+    effect_passes: usize,
 }
 
 impl ApplicationHandler for Root {
@@ -21,8 +24,20 @@ impl ApplicationHandler for Root {
         if self.app.is_some() {
             return;
         }
-        match build_app(event_loop, &self.path) {
-            Ok(a) => self.app = Some(a),
+
+        let hidden = self.export_to.is_some();
+        match build_app(event_loop, &self.path, hidden, self.effect_passes) {
+            Ok(a) => {
+                self.app = Some(a);
+                if let Some(output) = self.export_to.clone() {
+                    let app = self.app.as_mut().unwrap();
+                    match app.export(&output, usize::MAX) {
+                        Ok(n) => println!("exported {n} frames → {output}"),
+                        Err(e) => eprintln!("export failed: {e:?}"),
+                    }
+                    event_loop.exit();
+                }
+            }
             Err(e) => {
                 eprintln!("initialization failed: {e:?}");
                 event_loop.exit();
@@ -60,8 +75,12 @@ impl ApplicationHandler for Root {
     }
 }
 
-fn build_app(event_loop: &ActiveEventLoop, path: &str) -> Result<App> {
-    // ---- wgpu instance + adapter ----
+fn build_app(
+    event_loop: &ActiveEventLoop,
+    path: &str,
+    hidden: bool,
+    effect_passes: usize,
+) -> Result<App> {
     let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
     instance_desc.backends = wgpu::Backends::VULKAN;
     let instance = wgpu::Instance::new(instance_desc);
@@ -77,18 +96,19 @@ fn build_app(event_loop: &ActiveEventLoop, path: &str) -> Result<App> {
     let info = adapter.get_info();
     println!("Adapter: {} ({:?})", info.name, info.backend);
 
-    // ---- peek video dimensions + fps ----
     let (vw, vh, fps) = unsafe { ffmpeg::peek_video_info(path)? };
     println!("Video: {vw}x{vh} @ {fps:.2} fps");
+    println!("Effect passes (diagnostic): {effect_passes}");
 
-    // ---- window + surface ----
+    let mut attrs = Window::default_attributes()
+        .with_title("HWA Video Preview")
+        .with_inner_size(winit::dpi::PhysicalSize::new(vw, vh));
+    if hidden {
+        attrs = attrs.with_visible(false);
+    }
     let window = Arc::new(
         event_loop
-            .create_window(
-                Window::default_attributes()
-                    .with_title("HWA Video Preview")
-                    .with_inner_size(winit::dpi::PhysicalSize::new(vw, vh)),
-            )
+            .create_window(attrs)
             .map_err(|e| anyhow!("create_window: {e}"))?,
     );
 
@@ -116,7 +136,6 @@ fn build_app(event_loop: &ActiveEventLoop, path: &str) -> Result<App> {
         color_space: wgpu::SurfaceColorSpace::Srgb,
     };
 
-    // ---- host context (patched grafting, enables external memory) ----
     let device_desc = wgpu::DeviceDescriptor {
         label: Some("preview-device"),
         required_features: wgpu::Features::empty(),
@@ -129,11 +148,30 @@ fn build_app(event_loop: &ActiveEventLoop, path: &str) -> Result<App> {
         .map_err(|e| anyhow!("create_dmabuf_host_context: {e:?}"))?;
     surface.configure(&host.device, &surface_config);
 
-    // ---- FFmpeg ----
     let ff = unsafe { ffmpeg::Handles::open(path, "/dev/dri/renderD128")? };
-
-    // ---- pipelines ----
     let pipelines = gpu::build_pipelines(&host, surface_format, vw, vh);
+
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let y_row_bytes = vw;
+    let y_src_padded = y_row_bytes.div_ceil(align) * align;
+    let y_buf_size = (y_src_padded * vh) as u64;
+
+    let uv_row_bytes = (vw / 2) * 2;
+    let uv_src_padded = uv_row_bytes.div_ceil(align) * align;
+    let uv_buf_size = (uv_src_padded * (vh / 2)) as u64;
+
+    let readback_y_buffer = host.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("nv12-y-readback"),
+        size: y_buf_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let readback_uv_buffer = host.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("nv12-uv-readback"),
+        size: uv_buf_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
 
     Ok(App {
         window,
@@ -143,6 +181,8 @@ fn build_app(event_loop: &ActiveEventLoop, path: &str) -> Result<App> {
         pipelines,
         ff,
         texture_cache: std::collections::HashMap::new(),
+        readback_y_buffer,
+        readback_uv_buffer,
         frames: 0,
         last_log: Instant::now(),
         timing_decode: std::time::Duration::ZERO,
@@ -151,18 +191,39 @@ fn build_app(event_loop: &ActiveEventLoop, path: &str) -> Result<App> {
         timing_gpu: std::time::Duration::ZERO,
         cache_hits: 0,
         cache_misses: 0,
+        last_report_elapsed: 0.0,
+        effect_passes,
     })
 }
 
 fn main() -> Result<()> {
     env_logger::init();
 
-    let path = std::env::args()
-        .nth(1)
+    let mut args = std::env::args().skip(1);
+    let path = args
+        .next()
         .unwrap_or_else(|| "/tmp/h264_test.mp4".to_string());
 
+    let export_to = match args.next().as_deref() {
+        Some("export") => {
+            let out = args.next().context("export requires an output path")?;
+            Some(out)
+        }
+        _ => None,
+    };
+
+    let effect_passes: usize = std::env::var("EFFECT_PASSES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
     let event_loop = EventLoop::new().map_err(|e| anyhow!("EventLoop::new: {e}"))?;
-    let mut root = Root { app: None, path };
+    let mut root = Root {
+        app: None,
+        path,
+        export_to,
+        effect_passes,
+    };
     event_loop
         .run_app(&mut root)
         .map_err(|e| anyhow!("event loop: {e}"))?;
