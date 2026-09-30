@@ -211,6 +211,8 @@ fn map_format(format: wgpu::TextureFormat) -> Result<vk::Format, InteropError> {
         wgpu::TextureFormat::Rgba8UnormSrgb => Ok(vk::Format::R8G8B8A8_SRGB),
         wgpu::TextureFormat::Bgra8Unorm => Ok(vk::Format::B8G8R8A8_UNORM),
         wgpu::TextureFormat::Bgra8UnormSrgb => Ok(vk::Format::B8G8R8A8_SRGB),
+        wgpu::TextureFormat::R8Unorm => Ok(vk::Format::R8_UNORM),
+        wgpu::TextureFormat::Rg8Unorm => Ok(vk::Format::R8G8_UNORM),
         other => Err(InteropError::Vulkan(format!(
             "DMABUF import does not support wgpu format {other:?}"
         ))),
@@ -226,12 +228,16 @@ fn map_drm_format(
     const DRM_FORMAT_ABGR8888: u32 = 0x3432_4241; // AB24, RGBA bytes
     const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258; // XR24
     const DRM_FORMAT_XBGR8888: u32 = 0x3432_4258; // XB24
-    const DRM_FORMAT_BGRA8888: u32 = 0x3432_4142; // BA24, BGRA bytes (VAAPI on i965)
+    const DRM_FORMAT_BGRA8888: u32 = 0x3432_4142; // BA24 (VAAPI VPP on i965)
+    const DRM_FORMAT_R8: u32 = 0x2020_3852; // 'R8  ' — NV12 Y plane
+    const DRM_FORMAT_GR88: u32 = 0x3838_5247; // 'GR88' — NV12 UV plane
 
     match drm_format {
         DRM_FORMAT_ARGB8888 | DRM_FORMAT_XRGB8888 => Ok(vk::Format::B8G8R8A8_UNORM),
         DRM_FORMAT_ABGR8888 | DRM_FORMAT_XBGR8888 => Ok(vk::Format::R8G8B8A8_UNORM),
-        DRM_FORMAT_BGRA8888 => Ok(vk::Format::B8G8R8A8_UNORM), // <-- ADDED
+        DRM_FORMAT_BGRA8888 => Ok(vk::Format::B8G8R8A8_UNORM),
+        DRM_FORMAT_R8 => Ok(vk::Format::R8_UNORM),
+        DRM_FORMAT_GR88 => Ok(vk::Format::R8G8_UNORM),
         0 => map_format(fallback),
         other => Err(InteropError::Vulkan(format!(
             "DMABUF import does not support DRM fourcc {other:#010x}"
