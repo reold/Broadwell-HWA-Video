@@ -243,14 +243,15 @@ compositor is decoupled.
 
 ## 🙏 Acknowledgements
 
-[`grafting`](https://github.com/gfx-rs/grafting) by the gfx-rs community —
-the zero-copy import machinery that made this possible. Without its
-`VulkanDmaBufImport` and `create_dmabuf_host_context`, this project would
-have needed several hundred lines of raw `ash` code just to open a DMA-BUF
-as a Vulkan image.
+[`grafting`](https://github.com/merely-made/wgpu-graft) — the core texture
+interop library of the Servo `wgpu-graft` workspace. Its
+`VulkanDmaBufImport` and `create_dmabuf_host_context` provide the
+zero-copy DMA-BUF import machinery that made this project possible. Without
+them, several hundred lines of raw `ash` code would have been necessary just
+to open a DMA-BUF as a Vulkan image.
 
-The `vendor/grafting` directory retains its original MPL-2.0 license and
-copyright.
+The `vendor/grafting` directory is a locally patched copy of the crates.io
+release (v0.6.0) and retains its original MPL-2.0 license and copyright.
 
 ## 📜 License
 
